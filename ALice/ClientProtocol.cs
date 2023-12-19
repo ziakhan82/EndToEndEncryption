@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -13,28 +14,81 @@ namespace ALice
     {
         public async Task Run()
         {
+            using var socket = new SocketWrapper();
             var exchange = new SessionKeyExchange();
 
-            using var socket = new SocketWrapper();
-            await socket.Connect(new IPEndPoint(IPAddress.Parse("127.0.0.1"), 1666));
+            try
+            {
+                // Connect to the server
+                await socket.Connect(new IPEndPoint(IPAddress.Parse("127.0.0.1"), 1666));
 
-            // The client sends its public key bytes to the server using the SendBytes method.
-            var ownPubKey = exchange.PublicKey.ExportSubjectPublicKeyInfo();
-            await socket.SendBytes(ownPubKey);
+                // Send own public key to the server
+                var ownPubKey = exchange.PublicKey.ExportSubjectPublicKeyInfo();
+                await socket.SendBytes(ownPubKey);
 
-            // The client waits to receive the public key bytes from the server using the ReceiveBytes method.
-            var otherPubKeyBytes = await socket.ReceiveBytes();
+                // Receive the other party's public key
+                var otherPubKeyBytes = await socket.ReceiveBytes();
+                var otherPubKey = SessionKeyExchange.ImportPublicKey(otherPubKeyBytes);
 
-            // The received public key bytes are imported using the ImportPublicKey method.
-            var otherPubKey = SessionKeyExchange.ImportPublicKey(otherPubKeyBytes);
+                // Generate a session key and send it to the server
+                var sessionKey = exchange.GenerateSessionKey(out var secretMessage, otherPubKey);
+                var sessionKeyJson = JsonSerializer.Serialize(secretMessage);
+                await socket.Send(sessionKeyJson);
 
-            // The client generates a session key and sends it as a JSON string to the server using the Send method.
-            var sessionKey = exchange.GenerateSessionKey(out var encryptedSessionKey, otherPubKey);
-            var sessionKeyJson = JsonSerializer.Serialize(encryptedSessionKey);
-            await socket.Send(sessionKeyJson);
+                Console.WriteLine("Session key: " + Convert.ToBase64String(sessionKey));
 
-            Console.WriteLine("Session key sent to the server.");
+                // Start communication loop
+                while (true)
+                {
+                    Console.Write("Enter a message to send (or type 'exit' to quit): ");
+                    var message = Console.ReadLine();
+
+                    if (message.ToLower() == "exit")
+                        break;
+
+                    // Encrypt the message using the session key
+                    var encryptedMessage = SymmetricEncryption.Encrypt(Encoding.UTF8.GetBytes(message), sessionKey);
+                    // Extract the cipher bytes from the SecretMessage
+                    var cipherBytes = encryptedMessage.Cipher;
+
+                    // await socket.SendBytes(encryptedMessage);
+
+                    // Send the cipher bytes to the server
+                    await socket.SendBytes(cipherBytes);
+
+                    //Receive the encrypted message from the server
+                    var receivedEncryptedMessage = await socket.ReceiveBytes();
+
+                    // Decrypt the message using the session key
+                    var decryptedSecretMessage = SymmetricEncryption.Decrypt(new SecretMessage
+                    {
+                        Cipher = receivedEncryptedMessage
+                    }, sessionKey);
+
+                    // Set the Nonce and Tag from the decrypted SecretMessage
+
+
+                    // Decrypt the message using the session key, nonce, and tag
+                    var decryptedMessage = SymmetricEncryption.Decrypt(new SecretMessage
+                    {
+                        Cipher = decryptedSecretMessage
+                    }, sessionKey);
+
+                    // Print the decrypted message
+                    Console.WriteLine($"Received message: {Encoding.UTF8.GetString(decryptedMessage)}");
+                }
+            
+            }
+            finally
+            {
+                // Disconnect when done or in case of an exception
+                socket.Disconnect();
+            }
         }
     }
-}
+
+   
+        }
+    
+
 
